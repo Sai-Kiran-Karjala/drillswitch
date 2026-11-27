@@ -5,6 +5,7 @@ import { clerkEnabled } from "@/lib/saas/clerk-enabled";
 
 const NAV = [
   { href: "/drills", label: "Drills" },
+  { href: "/copilot", label: "Copilot" },
   { href: "/pricing", label: "Pricing" },
   { href: "/results", label: "Lab results" },
 ];

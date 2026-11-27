@@ -1,5 +1,6 @@
 import "server-only";
 import { randomBytes } from "node:crypto";
+import type { AgentRun } from "@/lib/copilot/agent";
 import { recordDrillRun } from "@/lib/saas/db";
 import { assignVariant, trackOutcome, type TrafficSource } from "./experiment";
 import {
@@ -77,6 +78,10 @@ export interface DrillSession {
   deadline: number;
   result: DrillResult | null;
   applying: boolean;
+  /** Copilot drills: the agent's latest run, and how many runs this drill has used. */
+  agentRun?: AgentRun | null;
+  agentRuns?: number;
+  agentBusy?: boolean;
 }
 
 export type PublicSession = Pick<
@@ -141,7 +146,7 @@ export async function createSession(
   void sweep().catch(() => undefined);
   const { scenario, target: t } = opts;
   const id = randomBytes(8).toString("hex");
-  const playerId = opts.owner ? `user-${opts.owner.userId}` : `${source === "sim" ? "sim" : "player"}-${id}`;
+  const playerId = opts.owner ? `user-${opts.owner.userId}` : `${source === "human" ? "player" : source}-${id}`;
   const featureName = `drill_${id.slice(0, 8)}`;
   const segmentIds = await ensureSegments(t, scenario.segments);
   const featureId = await createDrillFeature(t, featureName, scenario.flag, scenario.baseline.enabled);
@@ -157,7 +162,8 @@ export async function createSession(
     await deleteFeature(t, featureId).catch(() => undefined);
     throw error;
   }
-  const variant = await assignVariant(source, playerId);
+  // The copilot always sees the blast radius and stays out of the experiment.
+  const variant = source === "agent" ? "scope_preview" : await assignVariant(source, playerId);
   const startedAt = Date.now();
   const session: DrillSession = {
     id,
@@ -240,13 +246,16 @@ export async function applyChange(id: string, change: Change, userId: string | n
     );
     const afterMap = Object.fromEntries(scenario.customers.map((c, i) => [c.id, after[i]]));
     const before = beforeOutcome(scenario);
-    const inTime = elapsedMs <= DRILL_SECONDS * 1000 + GRACE_MS;
+    // Copilot drills are graded on the outcome only: a person reviewing carefully is the point.
+    const inTime = session.source === "agent" || elapsedMs <= DRILL_SECONDS * 1000 + GRACE_MS;
     const g = grade(scenario, afterMap, inTime);
 
-    trackOutcome(session.source, session.playerId, {
-      success: g.verdict === "scoped_recovery",
-      collateral: g.healthyBroken > 0,
-    });
+    if (session.source !== "agent") {
+      trackOutcome(session.source, session.playerId, {
+        success: g.verdict === "scoped_recovery",
+        collateral: g.healthyBroken > 0,
+      });
+    }
 
     session.result = {
       change,
@@ -255,7 +264,7 @@ export async function applyChange(id: string, change: Change, userId: string | n
       customers: scenario.customers.map((c) => ({ id: c.id, before: before[c.id], after: afterMap[c.id] })),
       flagsmithCall: describeCall(change, session),
     };
-    if (session.owner) {
+    if (session.owner && session.source !== "agent") {
       await recordDrillRun({
         id: session.id,
         workspaceId: session.owner.workspaceId,

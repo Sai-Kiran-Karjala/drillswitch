@@ -29,12 +29,15 @@ export function CustomerTable({
   after,
   caption,
   afterLabel = "After",
+  compact = false,
 }: {
   scenario: Scenario;
   before: Record<string, boolean>;
   after: Record<string, boolean>;
   caption: string;
   afterLabel?: string;
+  /** Narrow containers: drop the details column. */
+  compact?: boolean;
 }) {
   return (
     <Table>
@@ -42,7 +45,7 @@ export function CustomerTable({
       <TableHeader>
         <TableRow>
           <TableHead>Customer</TableHead>
-          <TableHead className="hidden sm:table-cell">Details</TableHead>
+          {!compact && <TableHead className="hidden sm:table-cell">Details</TableHead>}
           <TableHead>Now</TableHead>
           <TableHead>{afterLabel}</TableHead>
           <TableHead>Result</TableHead>
@@ -62,9 +65,9 @@ export function CustomerTable({
                     </span>
                   )}
                 </div>
-                <div className="text-xs text-muted-foreground sm:hidden">{c.detail}</div>
+                <div className={cn("text-xs text-muted-foreground", !compact && "sm:hidden")}>{c.detail}</div>
               </TableCell>
-              <TableCell className="hidden text-muted-foreground sm:table-cell">{c.detail}</TableCell>
+              {!compact && <TableCell className="hidden text-muted-foreground sm:table-cell">{c.detail}</TableCell>}
               <TableCell>
                 <FlagState on={before[c.id]} />
               </TableCell>

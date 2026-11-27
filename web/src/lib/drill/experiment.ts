@@ -3,7 +3,9 @@ import { Flagsmith } from "@flagsmith/nodejs";
 import { getConfig } from "./config";
 import type { ConsoleVariant } from "./scenario";
 
-export type TrafficSource = "human" | "sim";
+/** "agent" drills are run by the AI copilot and never join the experiment. */
+export type TrafficSource = "human" | "sim" | "agent";
+type ExperimentSource = Exclude<TrafficSource, "agent">;
 
 export const EXPERIMENT_FLAG = "drill_console";
 export const EVENTS = {
@@ -11,10 +13,10 @@ export const EVENTS = {
   collateral: "healthy_customers_broken",
 } as const;
 
-const globalForSdk = globalThis as unknown as { __drillSdk?: Partial<Record<TrafficSource, Flagsmith>> };
+const globalForSdk = globalThis as unknown as { __drillSdk?: Partial<Record<ExperimentSource, Flagsmith>> };
 
 /** Humans run in Production, simulated players in Simulation, so results never mix. */
-function client(source: TrafficSource): Flagsmith {
+function client(source: ExperimentSource): Flagsmith {
   globalForSdk.__drillSdk ??= {};
   const cached = globalForSdk.__drillSdk[source];
   if (cached) return cached;
@@ -39,12 +41,12 @@ export function vendorSdk(): Flagsmith {
  * Gets the player's console variant. This call also records the exposure, so it is made
  * when the console is about to be shown.
  */
-export async function assignVariant(source: TrafficSource, playerId: string): Promise<ConsoleVariant> {
+export async function assignVariant(source: ExperimentSource, playerId: string): Promise<ConsoleVariant> {
   const flag = await client(source).getExperimentFlag(EXPERIMENT_FLAG, playerId);
   return flag.value === "scope_preview" ? "scope_preview" : "runbook";
 }
 
-export function trackOutcome(source: TrafficSource, playerId: string, outcome: { success: boolean; collateral: boolean }) {
+export function trackOutcome(source: ExperimentSource, playerId: string, outcome: { success: boolean; collateral: boolean }) {
   const sdk = client(source);
   if (outcome.success) sdk.trackEvent(EVENTS.success, { identifier: playerId });
   if (outcome.collateral) sdk.trackEvent(EVENTS.collateral, { identifier: playerId });

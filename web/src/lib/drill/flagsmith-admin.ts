@@ -85,6 +85,21 @@ export async function deleteFeature(t: FlagsmithTarget, featureId: number): Prom
   await adminRequest(t, "DELETE", `projects/${t.projectId}/features/${featureId}/`);
 }
 
+/** Reads a feature's live state in one environment: the default and how many overrides exist. */
+export async function readFeatureState(
+  t: FlagsmithTarget,
+  envKey: string,
+  featureId: number,
+): Promise<{ defaultEnabled: boolean; segmentOverrides: number; identityOverrides: number }> {
+  const rows = listOf(await adminRequest(t, "GET", `environments/${envKey}/featurestates/?feature=${featureId}`));
+  const base = rows.find((s) => !s.feature_segment && !s.identity);
+  return {
+    defaultEnabled: Boolean(base?.enabled),
+    segmentOverrides: rows.filter((s) => s.feature_segment).length,
+    identityOverrides: rows.filter((s) => s.identity).length,
+  };
+}
+
 /** Sets the environment-wide default for a feature (the "kill switch"). */
 export async function setEnvironmentDefault(
   t: FlagsmithTarget,
