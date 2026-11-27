@@ -12,7 +12,7 @@ export const metadata: Metadata = { title: "Copilot incident — DrillSwitch" };
 async function Content({ params }: { params: PageProps<"/copilot/[id]">["params"] }) {
   await connection();
   const { id } = await params;
-  const session = getSession(id);
+  const session = await getSession(id);
   if (!session || session.source !== "agent") {
     return (
       <div className="mx-auto flex w-full max-w-md flex-col items-center gap-4 px-4 py-24 text-center">

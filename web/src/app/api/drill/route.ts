@@ -1,4 +1,5 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
+import { flushExperimentEvents } from "@/lib/drill/experiment";
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { getConfig } from "@/lib/drill/config";
 import { demoTarget } from "@/lib/drill/flagsmith-admin";
@@ -15,6 +16,7 @@ import { resolveTarget } from "@/lib/saas/workspace";
  * Optional { scenario }: a built-in drill id, the workspace's own drill id, or "random" (default).
  */
 export async function POST(request: Request) {
+  after(() => flushExperimentEvents()); // exposure and outcome events must leave before a serverless function freezes
   const body = (await request.json().catch(() => ({}))) as { source?: string; mode?: string; scenario?: string };
   const scenarioId = typeof body.scenario === "string" ? body.scenario.slice(0, 64) : undefined;
   const wantsSim = body.source === "sim";

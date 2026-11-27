@@ -24,7 +24,7 @@ function ConsoleSkeleton() {
 async function DrillContent({ params }: { params: PageProps<"/drill/[id]">["params"] }) {
   await connection();
   const { id } = await params;
-  const session = getSession(id);
+  const session = await getSession(id);
 
   if (!session) {
     return (

@@ -26,10 +26,23 @@ function client(source: ExperimentSource): Flagsmith {
     apiUrl: `${url}/api/v1/`,
     enableEvents: true,
     // Self-hosted with the Flagsmith-database warehouse: events go to the API itself.
-    eventProcessorConfig: { eventsApiUrl: `${url}/api/` },
+    // Flagsmith Cloud has its own events host, which the SDK uses by default.
+    ...(isFlagsmithCloud(url) ? {} : { eventProcessorConfig: { eventsApiUrl: `${url}/api/` } }),
   });
   globalForSdk.__drillSdk[source] = sdk;
   return sdk;
+}
+
+function isFlagsmithCloud(url: string) {
+  return /(^|\.)flagsmith\.com$/.test(new URL(url).hostname);
+}
+
+/**
+ * Sends buffered experiment events now. Serverless hosts freeze a function once it has
+ * responded, so routes call this from after() instead of relying on the background timer.
+ */
+export async function flushExperimentEvents(): Promise<void> {
+  await Promise.all(Object.values(globalForSdk.__drillSdk ?? {}).map((sdk) => sdk?.flushEvents().catch(() => undefined)));
 }
 
 /** The SDK client for DrillSwitch's own Production environment (experiment + plan entitlements). */

@@ -1,4 +1,5 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
+import { flushExperimentEvents } from "@/lib/drill/experiment";
 import { auth } from "@clerk/nextjs/server";
 import { clerkEnabled } from "@/lib/saas/clerk-enabled";
 import { applyChange, DrillError } from "@/lib/drill/sessions";
@@ -26,6 +27,7 @@ function parseChange(body: unknown): Change | null {
 }
 
 export async function POST(request: Request, ctx: RouteContext<"/api/drill/[id]/apply">) {
+  after(() => flushExperimentEvents()); // exposure and outcome events must leave before a serverless function freezes
   const { id } = await ctx.params;
   const change = parseChange(await request.json().catch(() => null));
   if (!change) return NextResponse.json({ error: "Pick an environment, a target and an action." }, { status: 400 });

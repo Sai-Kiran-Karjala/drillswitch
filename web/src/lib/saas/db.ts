@@ -3,12 +3,15 @@ import postgres from "postgres";
 import type { Change, ConsoleVariant, Verdict } from "@/lib/drill/scenario";
 
 /** Bump when the schema below changes, so a running dev server re-applies it. */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const g = globalThis as unknown as { __sql?: postgres.Sql; __schema?: Promise<void>; __schemaVersion?: number };
 
 function sql(): postgres.Sql {
   if (!process.env.DATABASE_URL) throw new Error("Missing DATABASE_URL. Run scripts/bootstrap.mjs.");
-  g.__sql ??= postgres(process.env.DATABASE_URL, { max: 5, onnotice: () => undefined });
+  // Hosted Postgres poolers (e.g. Neon's "-pooler" endpoint) run in transaction mode,
+  // which doesn't support prepared statements.
+  const pooled = /-pooler\./.test(process.env.DATABASE_URL);
+  g.__sql ??= postgres(process.env.DATABASE_URL, { max: 5, prepare: !pooled, onnotice: () => undefined });
   return g.__sql;
 }
 
@@ -48,6 +51,17 @@ async function ready(): Promise<postgres.Sql> {
         updated_at    timestamptz NOT NULL DEFAULT now()
       )`;
     await db`CREATE INDEX IF NOT EXISTS drill_scenarios_workspace ON drill_scenarios (workspace_id, created_at DESC)`;
+    // Live drill sessions. Kept in the database so any server instance can serve any drill.
+    await db`
+      CREATE TABLE IF NOT EXISTS drill_sessions (
+        id             text PRIMARY KEY,
+        data           jsonb NOT NULL,
+        admin_key      text NOT NULL,
+        started_at     timestamptz NOT NULL,
+        applying_since timestamptz,
+        agent_since    timestamptz
+      )`;
+    await db`CREATE INDEX IF NOT EXISTS drill_sessions_started ON drill_sessions (started_at)`;
   })().catch((error) => {
     g.__schema = undefined;
     throw error;

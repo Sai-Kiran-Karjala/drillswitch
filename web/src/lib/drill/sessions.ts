@@ -2,6 +2,7 @@ import "server-only";
 import { randomBytes } from "node:crypto";
 import type { AgentRun } from "@/lib/copilot/agent";
 import { recordDrillRun } from "@/lib/saas/db";
+import { claim, loadSession, patchSession, putSession, release, removeSession, takeExpired } from "./session-store";
 import { assignVariant, trackOutcome, type TrafficSource } from "./experiment";
 import {
   createDrillFeature,
@@ -77,11 +78,9 @@ export interface DrillSession {
   startedAt: number;
   deadline: number;
   result: DrillResult | null;
-  applying: boolean;
   /** Copilot drills: the agent's latest run, and how many runs this drill has used. */
   agentRun?: AgentRun | null;
   agentRuns?: number;
-  agentBusy?: boolean;
 }
 
 export type PublicSession = Pick<
@@ -89,8 +88,7 @@ export type PublicSession = Pick<
   "id" | "scenario" | "kind" | "source" | "variant" | "targetMode" | "featureName" | "startedAt" | "deadline" | "result"
 >;
 
-const store = globalThis as unknown as { __drillSessions?: Map<string, DrillSession>; __drillLastSweep?: number };
-const sessions = (store.__drillSessions ??= new Map<string, DrillSession>());
+const store = globalThis as unknown as { __drillLastSweep?: number };
 
 export function toPublic(s: DrillSession): PublicSession {
   return {
@@ -107,25 +105,25 @@ export function toPublic(s: DrillSession): PublicSession {
   };
 }
 
-export function getSession(id: string): DrillSession | undefined {
-  return sessions.get(id);
+export function getSession(id: string): Promise<DrillSession | undefined> {
+  return loadSession(id);
 }
+
+export { claim as claimSession, patchSession, release as releaseSession };
 
 const SWEEP_EVERY_MS = 60 * 1000;
 
 /**
- * Deletes sandbox flags older than the TTL. Expired in-memory sessions are cleaned in
- * their own target; then every project in DrillSwitch's Flagsmith organisation (demo and
- * hosted workspaces) is scanned, so flags orphaned by a restart go too. At most once a minute.
+ * Deletes sandbox flags older than the TTL. Expired sessions are cleaned in their own target;
+ * then every project in DrillSwitch's Flagsmith organisation (demo and hosted workspaces) is
+ * scanned, so flags whose session was lost go too. At most once a minute per server instance.
  */
 async function sweep() {
   const now = Date.now();
   if (now - (store.__drillLastSweep ?? 0) < SWEEP_EVERY_MS) return;
   store.__drillLastSweep = now;
   const cutoff = now - SESSION_TTL_MS;
-  for (const s of sessions.values()) {
-    if (s.startedAt >= cutoff) continue;
-    sessions.delete(s.id);
+  for (const s of await takeExpired(cutoff).catch(() => [])) {
     if (!s.result || s.targetMode === "demo" || s.targetMode === "hosted") {
       await deleteFeature(s.target, s.featureId).catch(() => undefined);
     }
@@ -182,9 +180,13 @@ export async function createSession(
     startedAt,
     deadline: startedAt + DRILL_SECONDS * 1000,
     result: null,
-    applying: false,
   };
-  sessions.set(id, session);
+  try {
+    await putSession(session);
+  } catch (error) {
+    await deleteFeature(t, featureId).catch(() => undefined);
+    throw error;
+  }
   return session;
 }
 
@@ -212,15 +214,20 @@ export class DrillError extends Error {
 
 /** Applies the player's one change to Flagsmith, then asks Flagsmith what every customer now gets. */
 export async function applyChange(id: string, change: Change, userId: string | null): Promise<DrillResult> {
-  const session = sessions.get(id);
+  const session = await loadSession(id);
   if (!session) throw new DrillError("This drill has expired. Start a new one.", 404);
   if (session.owner && session.owner.userId !== userId) throw new DrillError("This drill belongs to someone else.", 403);
   if (session.result) return session.result;
   if (!isValidChange(session.scenario, change)) {
     throw new DrillError(`That target isn't part of this drill: ${describeChange(change, session.scenario)}`, 400);
   }
-  if (session.applying) throw new DrillError("A change is already being applied.", 409);
-  session.applying = true;
+  if (!(await claim(id, "apply"))) throw new DrillError("A change is already being applied.", 409);
+  // Another request may have finished applying between our read and the claim.
+  const fresh = await loadSession(id).catch(() => undefined);
+  if (fresh?.result) {
+    await release(id, "apply").catch(() => undefined);
+    return fresh.result;
+  }
 
   try {
     const t = session.target;
@@ -264,6 +271,7 @@ export async function applyChange(id: string, change: Change, userId: string | n
       customers: scenario.customers.map((c) => ({ id: c.id, before: before[c.id], after: afterMap[c.id] })),
       flagsmithCall: describeCall(change, session),
     };
+    await patchSession(id, { result: session.result });
     if (session.owner && session.source !== "agent") {
       await recordDrillRun({
         id: session.id,
@@ -285,11 +293,11 @@ export async function applyChange(id: string, change: Change, userId: string | n
     // Remove the sandbox flag straight away when nobody needs to inspect it: simulated
     // drills, and drills in a team's own Flagsmith (we keep our footprint there minimal).
     if (session.source === "sim" || session.targetMode === "byo") {
-      if (session.source === "sim") sessions.delete(session.id);
-      void deleteFeature(t, session.featureId).catch(() => undefined);
+      if (session.source === "sim") await removeSession(id).catch(() => undefined);
+      await deleteFeature(t, session.featureId).catch(() => undefined);
     }
     return session.result;
   } finally {
-    session.applying = false;
+    await release(id, "apply").catch(() => undefined);
   }
 }
