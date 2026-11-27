@@ -73,6 +73,11 @@ export function DrillConsole({ session }: { session: PublicSession }) {
             <span className="font-mono text-xs text-muted-foreground">
               {incident.id} · detected {incident.detectedAt}
             </span>
+            {session.practice && (
+              <Badge variant="secondary" className="font-normal" title="Only your first drill counts toward the live A/B test.">
+                Practice run · not counted in the experiment
+              </Badge>
+            )}
           </div>
           <h1 ref={headingRef} tabIndex={-1} className="text-2xl font-semibold tracking-tight outline-none sm:text-3xl">
             {result ? "Drill complete" : incident.title}

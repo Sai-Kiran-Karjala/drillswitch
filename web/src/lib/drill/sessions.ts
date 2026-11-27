@@ -80,6 +80,8 @@ export interface DrillSession {
   startedAt: number;
   deadline: number;
   result: DrillResult | null;
+  /** A repeat drill from someone already counted: playable, but sends nothing to the experiment. */
+  practice?: boolean;
   /** Copilot drills: the agent's latest run, and how many runs this drill has used. */
   agentRun?: AgentRun | null;
   agentRuns?: number;
@@ -87,7 +89,17 @@ export interface DrillSession {
 
 export type PublicSession = Pick<
   DrillSession,
-  "id" | "scenario" | "kind" | "source" | "variant" | "targetMode" | "featureName" | "startedAt" | "deadline" | "result"
+  | "id"
+  | "scenario"
+  | "kind"
+  | "source"
+  | "variant"
+  | "targetMode"
+  | "featureName"
+  | "startedAt"
+  | "deadline"
+  | "result"
+  | "practice"
 >;
 
 const store = globalThis as unknown as { __drillLastSweep?: number };
@@ -104,6 +116,7 @@ export function toPublic(s: DrillSession): PublicSession {
     startedAt: s.startedAt,
     deadline: s.deadline,
     result: s.result,
+    practice: s.practice ?? false,
   };
 }
 
@@ -189,12 +202,22 @@ async function settle(
 
 export async function createSession(
   source: TrafficSource,
-  opts: { scenario: Scenario; target: FlagsmithTarget; targetMode: TargetMode; owner?: DrillOwner },
+  opts: {
+    scenario: Scenario;
+    target: FlagsmithTarget;
+    targetMode: TargetMode;
+    owner?: DrillOwner;
+    /** A stable anonymous id for this person (from a cookie), so repeat visits are one player. */
+    playerId?: string;
+    practice?: boolean;
+  },
 ): Promise<DrillSession> {
   void sweep().catch(() => undefined);
   const { scenario, target: t } = opts;
   const id = randomBytes(8).toString("hex");
-  const playerId = opts.owner ? `user-${opts.owner.userId}` : `${source === "human" ? "player" : source}-${id}`;
+  const playerId = opts.owner
+    ? `user-${opts.owner.userId}`
+    : (opts.playerId ?? `${source === "human" ? "player" : source}-${id}`);
   const featureName = `drill_${id.slice(0, 8)}`;
   const segmentIds = await ensureSegments(t, scenario.segments);
   const featureId = await createDrillFeature(t, featureName, scenario.flag, scenario.baseline.enabled);
@@ -230,6 +253,7 @@ export async function createSession(
     startedAt,
     deadline: startedAt + DRILL_SECONDS * 1000,
     result: null,
+    practice: opts.practice ?? false,
   };
   // The copilot reads Flagsmith straight away; people start by reading the brief.
   if (source === "agent") await settle(t, scenario, featureName, beforeOutcome(scenario));
@@ -315,7 +339,7 @@ export async function applyChange(id: string, change: Change, userId: string | n
     const inTime = session.source === "agent" || elapsedMs <= DRILL_SECONDS * 1000 + GRACE_MS;
     const g = grade(scenario, afterMap, inTime);
 
-    if (session.source !== "agent") {
+    if (session.source !== "agent" && !session.practice) {
       trackOutcome(session.source, session.playerId, {
         success: g.verdict === "scoped_recovery",
         collateral: g.healthyBroken > 0,
