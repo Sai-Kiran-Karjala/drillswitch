@@ -1,0 +1,23 @@
+# DrillSwitch's own data (drill history per workspace). Kept apart from Flagsmith's database.
+# Use together with the Flagsmith compose file:
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.app.yml -p drillswitch up -d
+services:
+  appdb:
+    image: postgres:15.5-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: drillswitch
+      POSTGRES_USER: drillswitch
+      POSTGRES_PASSWORD: ${APPDB_PASSWORD:-drillswitch}
+    ports:
+      - '127.0.0.1:5433:5432' # localhost only
+    volumes:
+      - appdata:/var/lib/postgresql/data
+    healthcheck:
+      test: pg_isready -d drillswitch -U drillswitch
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+volumes:
+  appdata:

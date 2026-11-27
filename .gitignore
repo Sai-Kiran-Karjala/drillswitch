@@ -1,0 +1,8 @@
+infra/.admin.env
+*.env
+.env*
+!.env.example
+node_modules/
+.next/
+.clerk/
+.DS_Store
