@@ -34,7 +34,7 @@ const STEPS = [
   {
     icon: Target,
     title: "Make one change",
-    body: "Pick the environment, the target and the action. It is written to a real, self-hosted Flagsmith.",
+    body: "Pick the environment, the target and the action. It is written to a real Flagsmith instance.",
   },
   {
     icon: Timer,
