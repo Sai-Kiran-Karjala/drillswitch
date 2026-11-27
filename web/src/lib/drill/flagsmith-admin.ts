@@ -85,19 +85,66 @@ export async function deleteFeature(t: FlagsmithTarget, featureId: number): Prom
   await adminRequest(t, "DELETE", `projects/${t.projectId}/features/${featureId}/`);
 }
 
-/** Reads a feature's live state in one environment: the default and how many overrides exist. */
+// ---------- Flagsmith flavours ----------
+// Self-hosted (classic): feature states are edited in place, identities live in the core API.
+// Flagsmith Cloud: environments use v2 feature versioning (every change is a published version)
+// and identities are "edge" identities, served by the edge API, which catches up within seconds.
+
+/** Flagsmith Cloud (or a team's own Cloud organisation), as opposed to a self-hosted instance. */
+export function isFlagsmithCloud(url: string): boolean {
+  return /(^|\.)flagsmith\.com$/.test(new URL(url).hostname);
+}
+
+/** Where SDK-style evaluation happens: Cloud's edge API applies identity overrides; self-hosted is one API. */
+function sdkBase(t: FlagsmithConnection): string {
+  return isFlagsmithCloud(t.url) ? "https://edge.api.flagsmith.com" : t.url;
+}
+
+const envInfoCache = ((globalThis as { __drillEnvInfo?: Map<string, { id: number; v2: boolean }> }).__drillEnvInfo ??=
+  new Map());
+
+/** An environment's numeric id and whether it uses v2 feature versioning. */
+async function envInfo(t: FlagsmithTarget, envKey: string): Promise<{ id: number; v2: boolean }> {
+  const cached = envInfoCache.get(`${t.url}|${envKey}`);
+  if (cached) return cached;
+  const env = await adminRequest<{ id: number; use_v2_feature_versioning?: boolean }>(t, "GET", `environments/${envKey}/`);
+  const info = { id: Number(env.id), v2: Boolean(env.use_v2_feature_versioning) };
+  envInfoCache.set(`${t.url}|${envKey}`, info);
+  return info;
+}
+
+const EMPTY_VALUE = { type: "unicode", string_value: "" };
+
+/** v2 versioning: publishes one new version of a feature in an environment with the given changes. */
+async function publishVersion(
+  t: FlagsmithTarget,
+  envId: number,
+  featureId: number,
+  changes: { feature_states_to_create?: unknown[]; feature_states_to_update?: unknown[] },
+): Promise<void> {
+  await adminRequest(t, "POST", `environments/${envId}/features/${featureId}/versions/`, {
+    ...changes,
+    publish_immediately: true,
+  });
+}
+
+/** Reads a feature's live environment default with an SDK-style request (works with or without versioning). */
 export async function readFeatureState(
   t: FlagsmithTarget,
   envKey: string,
-  featureId: number,
-): Promise<{ defaultEnabled: boolean; segmentOverrides: number; identityOverrides: number }> {
-  const rows = listOf(await adminRequest(t, "GET", `environments/${envKey}/featurestates/?feature=${featureId}`));
-  const base = rows.find((s) => !s.feature_segment && !s.identity);
-  return {
-    defaultEnabled: Boolean(base?.enabled),
-    segmentOverrides: rows.filter((s) => s.feature_segment).length,
-    identityOverrides: rows.filter((s) => s.identity).length,
-  };
+  featureName: string,
+): Promise<{ defaultEnabled: boolean }> {
+  const res = await fetchOnce(`${sdkBase(t)}/api/v1/flags/`, {
+    headers: { "X-Environment-Key": envKey },
+    cache: "no-store",
+    redirect: "error",
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) throw new Error(`Flagsmith flags -> ${res.status}`);
+  const flags = (await res.json()) as { enabled: boolean; feature: { name: string } }[];
+  const flag = flags.find((f) => f.feature.name === featureName);
+  if (!flag) throw new Error(`Feature ${featureName} not served yet`);
+  return { defaultEnabled: flag.enabled };
 }
 
 /** Sets the environment-wide default for a feature (the "kill switch"). */
@@ -107,13 +154,21 @@ export async function setEnvironmentDefault(
   featureId: number,
   enabled: boolean,
 ): Promise<void> {
+  const env = await envInfo(t, envKey);
+  if (env.v2) {
+    await publishVersion(t, env.id, featureId, { feature_states_to_update: [{ enabled, feature_state_value: EMPTY_VALUE }] });
+    return;
+  }
   const rows = listOf(await adminRequest(t, "GET", `environments/${envKey}/featurestates/?feature=${featureId}`));
   const base = rows.find((s) => !s.feature_segment && !s.identity);
   if (!base) throw new Error(`No environment default found for feature ${featureId}`);
   await adminRequest(t, "PATCH", `environments/${envKey}/featurestates/${base.id}/`, { enabled });
 }
 
-/** Adds a segment override for a feature in one environment; returns its feature state id. */
+/**
+ * Adds a segment override for a feature in one environment. Returns its feature state id on
+ * classic environments, or 0 with versioning (versions are addressed by segment instead).
+ */
 export async function createSegmentOverride(
   t: FlagsmithTarget,
   envKey: string,
@@ -121,17 +176,37 @@ export async function createSegmentOverride(
   segmentId: number,
   enabled: boolean,
 ): Promise<number> {
+  const override = { enabled, feature_state_value: EMPTY_VALUE, feature_segment: { segment: segmentId } };
+  const env = await envInfo(t, envKey);
+  if (env.v2) {
+    await publishVersion(t, env.id, featureId, { feature_states_to_create: [override] });
+    return 0;
+  }
   const state = await adminRequest<{ id: number }>(
     t,
     "POST",
     `environments/${envKey}/features/${featureId}/create-segment-override/`,
-    { enabled, feature_state_value: { type: "unicode", string_value: "" }, feature_segment: { segment: segmentId } },
+    override,
   );
   return Number(state.id);
 }
 
-/** Turns an existing override (segment or identity) on or off by its feature state id. */
-export async function setFeatureState(t: FlagsmithTarget, envKey: string, featureStateId: number, enabled: boolean) {
+/** Turns an existing segment override on or off. */
+export async function updateSegmentOverride(
+  t: FlagsmithTarget,
+  envKey: string,
+  featureId: number,
+  segmentId: number,
+  featureStateId: number,
+  enabled: boolean,
+): Promise<void> {
+  const env = await envInfo(t, envKey);
+  if (env.v2) {
+    await publishVersion(t, env.id, featureId, {
+      feature_states_to_update: [{ enabled, feature_state_value: EMPTY_VALUE, feature_segment: { segment: segmentId } }],
+    });
+    return;
+  }
   await adminRequest(t, "PATCH", `environments/${envKey}/featurestates/${featureStateId}/`, { enabled });
 }
 
@@ -143,23 +218,26 @@ export async function createIdentityOverride(
   featureId: number,
   enabled: boolean,
 ): Promise<void> {
+  const edge = isFlagsmithCloud(t.url);
+  const base = `environments/${envKey}/${edge ? "edge-identities" : "identities"}/`;
+  const idOf = (i: Record<string, unknown>) => String(edge ? i.identity_uuid : i.id);
   const lookup = async () =>
-    listOf(await adminRequest(t, "GET", `environments/${envKey}/identities/?q=${encodeURIComponent(identifier)}`)).find(
+    listOf(await adminRequest(t, "GET", `${base}?q=${encodeURIComponent(identifier)}`)).find(
       (i) => i.identifier === identifier,
     );
   let found = await lookup();
   if (!found) {
     try {
-      found = await adminRequest<Record<string, unknown>>(t, "POST", `environments/${envKey}/identities/`, { identifier });
+      found = await adminRequest<Record<string, unknown>>(t, "POST", base, { identifier });
     } catch (error) {
       found = await lookup(); // another drill created it a moment ago
       if (!found) throw error;
     }
   }
-  const identityId = Number(found.id);
-  await adminRequest(t, "POST", `environments/${envKey}/identities/${identityId}/featurestates/`, {
+  await adminRequest(t, "POST", `${base}${idOf(found)}/${edge ? "edge-featurestates" : "featurestates"}/`, {
     feature: featureId,
     enabled,
+    feature_state_value: null,
   });
 }
 
@@ -241,7 +319,7 @@ export async function evaluateIdentity(
   traits: Record<string, string>,
   featureName: string,
 ): Promise<boolean> {
-  const res = await fetchOnce(`${t.url}/api/v1/identities/`, {
+  const res = await fetchOnce(`${sdkBase(t)}/api/v1/identities/`, {
     method: "POST",
     headers: { "X-Environment-Key": envKey, "content-type": "application/json" },
     body: JSON.stringify({

@@ -13,8 +13,9 @@ import {
   evaluateIdentity,
   listDrillFeatures,
   listVendorProjects,
+  isFlagsmithCloud,
   setEnvironmentDefault,
-  setFeatureState,
+  updateSegmentOverride,
   vendorConnection,
   type FlagsmithTarget,
 } from "./flagsmith-admin";
@@ -25,6 +26,7 @@ import {
   grade,
   isValidChange,
   parseTarget,
+  predictOutcome,
   type Change,
   type ConsoleVariant,
   type EnvironmentChoice,
@@ -137,6 +139,54 @@ async function sweep() {
   }
 }
 
+/**
+ * The Flagsmith identifier for a drill customer. Scoped to the drill, so concurrent drills never
+ * write to the same identity (on Flagsmith Cloud an identity's overrides share one document).
+ */
+export function flagsmithIdentity(featureName: string, customerId: string): string {
+  return `${customerId}.${featureName.replace(/^drill_/, "")}`;
+}
+
+/** Asks Flagsmith what every customer in the drill gets in Production right now. */
+async function evaluateAll(t: FlagsmithTarget, scenario: Scenario, featureName: string): Promise<Record<string, boolean>> {
+  const results = await Promise.all(
+    scenario.customers.map((c) =>
+      evaluateIdentity(t, t.env.production, flagsmithIdentity(featureName, c.id), c.traits, featureName),
+    ),
+  );
+  return Object.fromEntries(scenario.customers.map((c, i) => [c.id, results[i]]));
+}
+
+/**
+ * Flagsmith Cloud serves evaluations from its edge API, which picks up a change within a
+ * second or two, and not on every edge server at the same moment. Reads until two reads
+ * in a row show the change we expect (or 15 s pass), and returns the last read: a real
+ * Flagsmith evaluation, which is what grading uses. The expectation only decides when to
+ * stop reading. Self-hosted Flagsmith is consistent at once, so it is read once.
+ */
+async function settle(
+  t: FlagsmithTarget,
+  scenario: Scenario,
+  featureName: string,
+  expected: Record<string, boolean>,
+): Promise<Record<string, boolean>> {
+  if (!isFlagsmithCloud(t.url)) return evaluateAll(t, scenario, featureName);
+  const deadline = Date.now() + 15_000;
+  let last: Record<string, boolean> | null = null;
+  let matches = 0;
+  while (Date.now() < deadline) {
+    try {
+      last = await evaluateAll(t, scenario, featureName);
+      matches = scenario.customers.every((c) => last![c.id] === expected[c.id]) ? matches + 1 : 0;
+      if (matches >= 2) return last;
+    } catch {
+      // the edge API hasn't seen the new flag yet
+    }
+    await new Promise((r) => setTimeout(r, 600));
+  }
+  return last ?? evaluateAll(t, scenario, featureName);
+}
+
 export async function createSession(
   source: TrafficSource,
   opts: { scenario: Scenario; target: FlagsmithTarget; targetMode: TargetMode; owner?: DrillOwner },
@@ -181,6 +231,8 @@ export async function createSession(
     deadline: startedAt + DRILL_SECONDS * 1000,
     result: null,
   };
+  // The copilot reads Flagsmith straight away; people start by reading the brief.
+  if (source === "agent") await settle(t, scenario, featureName, beforeOutcome(scenario));
   try {
     await putSession(session);
   } catch (error) {
@@ -240,18 +292,24 @@ export async function applyChange(id: string, change: Change, userId: string | n
     if (kind === "all") {
       await setEnvironmentDefault(t, envKey, session.featureId, enabled);
     } else if (kind === "identity") {
-      await createIdentityOverride(t, envKey, key, session.featureId, enabled);
+      await createIdentityOverride(t, envKey, flagsmithIdentity(session.featureName, key), session.featureId, enabled);
     } else {
       const existing = session.baselineStates[change.environment][key];
-      if (existing !== undefined) await setFeatureState(t, envKey, existing, enabled);
+      if (existing !== undefined) await updateSegmentOverride(t, envKey, session.featureId, session.segmentIds[key], existing, enabled);
       else await createSegmentOverride(t, envKey, session.featureId, session.segmentIds[key], enabled);
     }
 
     // Verify against real Flagsmith evaluation in Production, where the customers are.
-    const after = await Promise.all(
-      scenario.customers.map((c) => evaluateIdentity(t, t.env.production, c.id, c.traits, session.featureName)),
-    );
-    const afterMap = Object.fromEntries(scenario.customers.map((c, i) => [c.id, after[i]]));
+    const expected = predictOutcome(scenario, change);
+    let afterMap = await settle(t, scenario, session.featureName, expected);
+    // Flagsmith Cloud can drop an identity override written while other flags are being deleted.
+    // If ours didn't land, write it once more (an exists-already error just means it had landed late).
+    if (kind === "identity" && isFlagsmithCloud(t.url) && afterMap[key] !== expected[key]) {
+      await createIdentityOverride(t, envKey, flagsmithIdentity(session.featureName, key), session.featureId, enabled).catch(
+        () => undefined,
+      );
+      afterMap = await settle(t, scenario, session.featureName, expected);
+    }
     const before = beforeOutcome(scenario);
     // Copilot drills are graded on the outcome only: a person reviewing carefully is the point.
     const inTime = session.source === "agent" || elapsedMs <= DRILL_SECONDS * 1000 + GRACE_MS;
@@ -292,8 +350,10 @@ export async function applyChange(id: string, change: Change, userId: string | n
 
     // Remove the sandbox flag straight away when nobody needs to inspect it: simulated
     // drills, and drills in a team's own Flagsmith (we keep our footprint there minimal).
-    if (session.source === "sim" || session.targetMode === "byo") {
-      if (session.source === "sim") await removeSession(id).catch(() => undefined);
+    // (On Flagsmith Cloud, deleting a flag starts background work on identity overrides that can
+    // race with other drills applying one, so there the regular sweep removes it later.)
+    if (session.source === "sim") await removeSession(id).catch(() => undefined);
+    if ((session.source === "sim" || session.targetMode === "byo") && !isFlagsmithCloud(t.url)) {
       await deleteFeature(t, session.featureId).catch(() => undefined);
     }
     return session.result;

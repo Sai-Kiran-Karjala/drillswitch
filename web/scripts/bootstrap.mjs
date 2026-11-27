@@ -12,6 +12,7 @@ import path from 'node:path';
 
 const URL_BASE = (process.env.FLAGSMITH_URL ?? 'http://localhost:8000').replace(/\/$/, '');
 const KEY = process.env.FLAGSMITH_API_KEY;
+const IS_CLOUD = /(^|\.)flagsmith\.com$/.test(new URL(URL_BASE).hostname);
 if (!KEY) {
   console.error('FLAGSMITH_API_KEY is required (organisation admin API key).');
   process.exit(1);
@@ -75,7 +76,8 @@ async function ensureProject() {
   if (!orgs.length) throw new Error('No organisation found for this API key.');
   const org = orgs[0];
   const projects = list(await api('GET', `projects/?organisation=${org.id}`));
-  let project = projects.find((p) => p.name === PROJECT_NAME);
+  // Free plans (cloud and self-hosted) allow one project, so match the name loosely and reuse it.
+  let project = projects.find((p) => p.name.toLowerCase() === PROJECT_NAME.toLowerCase());
   if (!project) {
     project = await api('POST', 'projects/', { name: PROJECT_NAME, organisation: org.id });
     log(`created project ${PROJECT_NAME}`);
@@ -99,6 +101,13 @@ async function ensureEnvironments(projectId) {
 
 async function ensureWarehouse(envKey) {
   const conns = list(await api('GET', `environments/${envKey}/warehouse-connections/`));
+  if (IS_CLOUD) {
+    // Flagsmith Cloud stores experiment events in its own warehouse. Keep it; add it if missing.
+    if (conns.some((c) => c.warehouse_type === 'flagsmith')) return;
+    await api('POST', `environments/${envKey}/warehouse-connections/`, { warehouse_type: 'flagsmith' });
+    log(`connected Flagsmith Cloud warehouse for ${envKey}`);
+    return;
+  }
   const good = conns.find((c) => c.config?.source === 'flagsmith_database');
   if (good) return;
   for (const c of conns) await api('DELETE', `environments/${envKey}/warehouse-connections/${c.id}/`);
@@ -179,11 +188,20 @@ async function ensureEntitlements(projectId, env, planSegmentId) {
     }
     const overrides = list(await api('GET', `features/feature-segments/?environment=${env.id}&feature=${feature.id}`));
     if (!overrides.some((o) => o.segment === planSegmentId)) {
-      await api('POST', `environments/${env.api_key}/features/${feature.id}/create-segment-override/`, {
+      const override = {
         enabled: e.team.enabled,
         feature_state_value: { type: 'unicode', string_value: e.team.value },
         feature_segment: { segment: planSegmentId },
-      });
+      };
+      if (env.use_v2_feature_versioning) {
+        // Versioned environments (the Flagsmith Cloud default): every change is a published version.
+        await api('POST', `environments/${env.id}/features/${feature.id}/versions/`, {
+          feature_states_to_create: [override],
+          publish_immediately: true,
+        });
+      } else {
+        await api('POST', `environments/${env.api_key}/features/${feature.id}/create-segment-override/`, override);
+      }
       log(`added team_plan override for ${e.name} in ${env.name}`);
     }
   }

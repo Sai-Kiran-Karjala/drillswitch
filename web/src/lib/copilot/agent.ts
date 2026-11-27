@@ -11,7 +11,7 @@ import {
   type FlagAction,
   type Target,
 } from "@/lib/drill/scenario";
-import type { DrillSession } from "@/lib/drill/sessions";
+import { flagsmithIdentity, type DrillSession } from "@/lib/drill/sessions";
 
 // The incident copilot: Gemini with read-only Flagsmith tools plus propose_change, which only
 // records a proposal. A person approves it in the UI; only then is anything written to Flagsmith.
@@ -156,7 +156,7 @@ async function runTool(
   const { scenario, target: t } = session;
   switch (name) {
     case "get_flag_state": {
-      const live = await readFeatureState(t, t.env.production, session.featureId);
+      const live = await readFeatureState(t, t.env.production, session.featureName);
       const overrides = scenario.baseline.overrides.map((o, priority) => {
         const segment = scenario.segments.find((g) => g.key === o.segment);
         return { priority, segment: o.segment, rule: segment ? segmentRule(segment) : "", enabled: o.enabled };
@@ -172,7 +172,13 @@ async function runTool(
           id: c.id,
           name: c.name,
           traits: c.traits,
-          enabled: await evaluateIdentity(t, t.env.production, c.id, c.traits, session.featureName),
+          enabled: await evaluateIdentity(
+            t,
+            t.env.production,
+            flagsmithIdentity(session.featureName, c.id),
+            c.traits,
+            session.featureName,
+          ),
         })),
       );
       const on = results.filter((r) => r.enabled).length;

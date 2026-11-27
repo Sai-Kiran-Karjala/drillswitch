@@ -1,6 +1,7 @@
 import "server-only";
 import { Flagsmith } from "@flagsmith/nodejs";
 import { getConfig } from "./config";
+import { isFlagsmithCloud } from "./flagsmith-admin";
 import type { ConsoleVariant } from "./scenario";
 
 /** "agent" drills are run by the AI copilot and never join the experiment. */
@@ -31,10 +32,6 @@ function client(source: ExperimentSource): Flagsmith {
   });
   globalForSdk.__drillSdk[source] = sdk;
   return sdk;
-}
-
-function isFlagsmithCloud(url: string) {
-  return /(^|\.)flagsmith\.com$/.test(new URL(url).hostname);
 }
 
 /**
