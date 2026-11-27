@@ -16,9 +16,12 @@ import { flagsmithIdentity, type DrillSession } from "@/lib/drill/sessions";
 // The incident copilot: Gemini with read-only Flagsmith tools plus propose_change, which only
 // records a proposal. A person approves it in the UI; only then is anything written to Flagsmith.
 
-// Free-tier models, fastest first. Each has its own free daily quota (about 20 requests), so
-// more models means more copilot runs per day. Override with GEMINI_MODELS=a,b,c in .env.local.
-const DEFAULT_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.6-flash"];
+// Free-tier models, fastest first. Each Gemini model has its own free daily quota (about 20
+// requests), so more models means more copilot runs per day. Groq's free tier is the backup,
+// used once every Gemini model is out of quota (about 1,000 requests a day, 8K tokens a minute).
+// Override with GEMINI_MODELS=a,b,c or GROQ_MODELS=a,b,c in .env.local.
+const DEFAULT_GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.6-flash"];
+const DEFAULT_GROQ_MODELS = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"];
 const MAX_TURNS = 8;
 const CALL_TIMEOUT_MS = 30_000;
 /** An on-call copilot that takes longer than the drill itself isn't helping. */
@@ -47,17 +50,38 @@ export interface AgentRun {
 
 export class CopilotUnavailable extends Error {}
 
-function models(): string[] {
-  const configured = process.env.GEMINI_MODELS?.split(",").map((m) => m.trim()).filter(Boolean);
-  return configured?.length ? configured : DEFAULT_MODELS;
+type Provider = "gemini" | "groq";
+interface ModelRef {
+  provider: Provider;
+  id: string;
 }
+
+const configuredList = (value: string | undefined, fallback: string[]) => {
+  const list = value?.split(",").map((m) => m.trim()).filter(Boolean);
+  return list?.length ? list : fallback;
+};
+
+// Only the keys the team put in .env.local; never any other credential on this machine.
+export const copilotConfigured = () => Boolean(process.env.GEMINI_API_KEY || process.env.GROQ_API_KEY);
+
+/** Every model the copilot may use, in order: Gemini first, then the Groq backup. */
+function modelChain(): ModelRef[] {
+  return [
+    ...(process.env.GEMINI_API_KEY ? configuredList(process.env.GEMINI_MODELS, DEFAULT_GEMINI_MODELS) : []).map(
+      (id) => ({ provider: "gemini" as const, id }),
+    ),
+    ...(process.env.GROQ_API_KEY ? configuredList(process.env.GROQ_MODELS, DEFAULT_GROQ_MODELS) : []).map(
+      (id) => ({ provider: "groq" as const, id }),
+    ),
+  ];
+}
+
+const modelKey = (m: ModelRef) => `${m.provider}:${m.id}`;
+const modelLabel = (m: ModelRef) => (m.provider === "groq" ? `${m.id} (Groq)` : m.id);
 
 let client: GoogleGenAI | undefined;
 function gemini(): GoogleGenAI {
-  // Only the key the team put in .env.local; never any other credential on this machine.
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new CopilotUnavailable("The copilot isn't set up on this server: GEMINI_API_KEY is missing.");
-  client ??= new GoogleGenAI({ apiKey });
+  client ??= new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   return client;
 }
 
@@ -219,106 +243,227 @@ async function runTool(
 }
 
 const isOverloaded = (error: unknown) => [429, 500, 503].includes((error as { status?: number }).status ?? 0);
+const status = (error: unknown) => (error as { status?: number }).status ?? 0;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 type Steps = Awaited<ReturnType<GoogleGenAI["interactions"]["create"]>> extends infer R
   ? R extends { steps: infer S } ? S : never
   : never;
 
-// Models that answered 429 (usually the free tier's daily quota) are skipped until Google says
+// Models that answered 429 (usually a free tier's daily quota) are skipped until the provider says
 // to retry. Kept per server instance; one failed call is enough for an instance to learn it.
-const cooldownUntil = ((globalThis as { __geminiCooldown?: Map<string, number> }).__geminiCooldown ??= new Map());
+const cooldownUntil = ((globalThis as { __copilotCooldown?: Map<string, number> }).__copilotCooldown ??= new Map());
 
-/** Reads "Please retry in 18h19m50s" from a 429, falling back to an hour for daily limits. */
+/**
+ * How long a 429 asks us to wait: Groq's retry-after header, or the message
+ * ("Please retry in 18h19m50s", "Please try again in 7.66s"). Falls back to an hour for daily limits.
+ */
 function retryAfterMs(error: unknown): number {
+  const header = (error as { retryAfterMs?: number }).retryAfterMs;
+  if (header) return header;
   const message = String((error as { message?: string }).message ?? "");
-  const m = message.match(/retry in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?/i);
+  const m = message.match(/(?:retry|try again) in (?:(\d+)h)?(?:(\d+)m(?!s))?(?:([\d.]+)s)?/i);
   if (m && (m[1] || m[2] || m[3])) return ((Number(m[1]) || 0) * 3600 + (Number(m[2]) || 0) * 60 + (Number(m[3]) || 0)) * 1000;
-  return /per day/i.test(message) ? 60 * 60 * 1000 : 60 * 1000;
+  return /per day|RPD/i.test(message) ? 60 * 60 * 1000 : 60 * 1000;
 }
 
-const status = (error: unknown) => (error as { status?: number }).status ?? 0;
+/**
+ * Retries a model call through brief hiccups: a 500/503, or a per-minute limit that clears within
+ * seconds (Groq's 8K tokens a minute). Longer waits, like a daily quota, go back to runCopilot,
+ * which moves on to the next model.
+ */
+async function withRetry<T>(call: () => Promise<T>, deadline: number): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await call();
+    } catch (error) {
+      if (!isOverloaded(error) || attempt >= 3) throw error;
+      const wait = status(error) === 429 ? retryAfterMs(error) + 250 : 2000;
+      if (wait > 20_000 || Date.now() + wait > deadline) throw error;
+      await sleep(wait);
+    }
+  }
+}
+
+interface ToolCall {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+}
+interface ToolResult {
+  call: ToolCall;
+  result: unknown;
+  isError?: boolean;
+}
+/** One provider's side of the conversation: send the last tool results, get the next tool calls. */
+interface Conversation {
+  next(results: ToolResult[]): Promise<{ calls: ToolCall[]; text: string }>;
+}
+
+function geminiConversation(session: DrillSession, model: string, deadline: number): Conversation {
+  const ai = gemini();
+  // Stateless: the conversation stays on this server (store: false) and is resent each turn.
+  const history: unknown[] = [{ type: "user_input", content: [{ type: "text", text: brief(session) }] }];
+  return {
+    async next(results) {
+      for (const r of results) {
+        history.push({
+          type: "function_result",
+          name: r.call.name,
+          call_id: r.call.id,
+          is_error: r.isError,
+          result: [{ type: "text", text: JSON.stringify(r.result) }],
+        });
+      }
+      const response = await withRetry(
+        () =>
+          ai.interactions.create(
+            { model, input: history as never, tools: TOOLS, store: false, system_instruction: SYSTEM },
+            { timeout_ms: CALL_TIMEOUT_MS },
+          ) as Promise<{ steps: Steps; output_text?: string }>,
+        deadline,
+      );
+      history.push(...response.steps);
+      const calls = response.steps
+        .filter((s): s is Extract<Steps[number], { type: "function_call" }> => s.type === "function_call")
+        .map((c) => ({ id: c.id, name: c.name, args: (c.arguments ?? {}) as Record<string, unknown> }));
+      return { calls, text: response.output_text ?? "" };
+    },
+  };
+}
+
+// Groq speaks the OpenAI chat-completions format, so the same tools are wrapped in "function".
+const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+const GROQ_TOOLS = TOOLS.map((t) => ({
+  type: "function" as const,
+  function: { name: t.name, description: t.description, parameters: t.parameters },
+}));
+
+interface GroqToolCall {
+  id: string;
+  function: { name: string; arguments: string };
+}
+
+async function groqChat(model: string, messages: unknown[]) {
+  const fail = (code: number, message: string, retryAfter?: number) =>
+    Object.assign(new Error(message), { status: code, retryAfterMs: retryAfter });
+  let res: Response;
+  try {
+    res = await fetch(GROQ_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        messages,
+        tools: GROQ_TOOLS,
+        tool_choice: "auto",
+        // gpt-oss reasons before answering; low effort keeps runs fast and within 8K tokens a minute.
+        ...(model.startsWith("openai/gpt-oss") ? { reasoning_effort: "low" } : {}),
+      }),
+      signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+    });
+  } catch {
+    throw fail(503, `Groq ${model} did not answer in time`);
+  }
+  if (!res.ok) {
+    const body = (await res.text()).slice(0, 300);
+    const retryAfter = Number(res.headers.get("retry-after")) * 1000 || undefined;
+    // A malformed tool call from the model is worth retrying, or handing to the next model.
+    const code = res.status === 400 && body.includes("tool_use_failed") ? 503 : res.status;
+    throw fail(code, `Groq ${res.status}: ${body}`, retryAfter);
+  }
+  return (await res.json()) as { choices?: { message?: { content?: string | null; tool_calls?: GroqToolCall[] } }[] };
+}
+
+function groqConversation(session: DrillSession, model: string, deadline: number): Conversation {
+  const messages: unknown[] = [
+    { role: "system", content: SYSTEM },
+    { role: "user", content: brief(session) },
+  ];
+  const parseArgs = (raw: string): Record<string, unknown> => {
+    try {
+      const parsed = JSON.parse(raw || "{}");
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  };
+  return {
+    async next(results) {
+      for (const r of results) {
+        messages.push({ role: "tool", tool_call_id: r.call.id, content: JSON.stringify(r.result) });
+      }
+      const data = await withRetry(() => groqChat(model, messages), deadline);
+      const message = data.choices?.[0]?.message ?? {};
+      const toolCalls = message.tool_calls ?? [];
+      messages.push({ role: "assistant", content: message.content ?? "", ...(toolCalls.length ? { tool_calls: toolCalls } : {}) });
+      const calls = toolCalls.map((c) => ({ id: c.id, name: c.function.name, args: parseArgs(c.function.arguments) }));
+      return { calls, text: message.content ?? "" };
+    },
+  };
+}
 
 export async function runCopilot(session: DrillSession): Promise<AgentRun> {
-  const ai = gemini();
+  const chain = modelChain();
+  if (chain.length === 0) {
+    throw new CopilotUnavailable("The copilot isn't set up on this server: add GEMINI_API_KEY or GROQ_API_KEY.");
+  }
   const started = Date.now();
-  const ready = models().filter((m) => (cooldownUntil.get(m) ?? 0) <= Date.now());
+  const ready = chain.filter((m) => (cooldownUntil.get(modelKey(m)) ?? 0) <= Date.now());
   // Every model cooling down: try them all anyway, in case a quota reset early.
-  for (const model of ready.length ? ready : models()) {
+  for (const model of ready.length ? ready : chain) {
     if (Date.now() - started > RUN_BUDGET_MS) break;
     try {
-      return await investigate(ai, session, model, started);
+      return await investigate(session, model, started);
     } catch (error) {
       if (!isOverloaded(error)) throw error;
-      if (status(error) === 429) cooldownUntil.set(model, Date.now() + retryAfterMs(error));
+      if (status(error) === 429) cooldownUntil.set(modelKey(model), Date.now() + retryAfterMs(error));
       // The tools only read, so starting over on the next model is safe.
-      console.warn(`copilot: ${model} unavailable (${status(error)}), trying the next model`);
+      console.warn(`copilot: ${modelLabel(model)} unavailable (${status(error)}), trying the next model`);
     }
   }
   throw new CopilotUnavailable("The copilot's free AI quota is used up for now. Try again later, or run the drill yourself.");
 }
 
-/** One full investigation on one model. Thought steps tie a conversation to the model that started it. */
-async function investigate(ai: GoogleGenAI, session: DrillSession, model: string, started: number): Promise<AgentRun> {
+/** One full investigation on one model. */
+async function investigate(session: DrillSession, model: ModelRef, started: number): Promise<AgentRun> {
+  const deadline = started + RUN_BUDGET_MS;
+  const conversation =
+    model.provider === "groq" ? groqConversation(session, model.id, deadline) : geminiConversation(session, model.id, deadline);
   const steps: AgentStep[] = [];
   let proposal: AgentProposal | null = null;
-  const history: unknown[] = [{ type: "user_input", content: [{ type: "text", text: brief(session) }] }];
-
-  const call = () =>
-    ai.interactions.create(
-      // Stateless: the conversation stays on this server (store: false) and is resent each turn.
-      { model, input: history as never, tools: TOOLS, store: false, system_instruction: SYSTEM },
-      { timeout_ms: CALL_TIMEOUT_MS },
-    ) as Promise<{ steps: Steps; output_text?: string }>;
-
-  const callWithRetry = async () => {
-    try {
-      return await call();
-    } catch (error) {
-      // A quota error won't clear in two seconds; let runCopilot move to the next model.
-      if (!isOverloaded(error) || status(error) === 429) throw error;
-      await new Promise((r) => setTimeout(r, 2000));
-      return call();
-    }
-  };
-
-  let response = await call();
   let message = "";
+  let results: ToolResult[] = [];
+
   for (let turn = 0; turn < MAX_TURNS; turn++) {
-    history.push(...response.steps);
-    const calls = response.steps.filter((s): s is Extract<Steps[number], { type: "function_call" }> => s.type === "function_call");
+    const { calls, text } = await conversation.next(results);
     if (calls.length === 0) {
-      message = response.output_text ?? "";
+      message = text;
       break;
     }
+    results = [];
     for (const c of calls) {
       const t0 = Date.now();
       let out: Awaited<ReturnType<typeof runTool>>;
       try {
-        out = await runTool(session, c.name, c.arguments ?? {}, (p) => (proposal ??= p));
+        out = await runTool(session, c.name, c.args, (p) => (proposal ??= p));
       } catch (error) {
         console.error(`copilot tool ${c.name} failed`, error);
         out = { result: { error: "The tool failed. Try another approach." }, summary: `${c.name} failed`, isError: true };
       }
-      steps.push({ tool: c.name, input: c.arguments ?? {}, summary: out.summary, ms: Date.now() - t0 });
-      history.push({
-        type: "function_result",
-        name: c.name,
-        call_id: c.id,
-        is_error: out.isError,
-        result: [{ type: "text", text: JSON.stringify(out.result) }],
-      });
+      steps.push({ tool: c.name, input: c.args, summary: out.summary, ms: Date.now() - t0 });
+      results.push({ call: c, result: out.result, isError: out.isError });
     }
     if (proposal) break; // the proposal is the deliverable; the reasoning travels with it
-    if (Date.now() - started > RUN_BUDGET_MS) {
+    if (Date.now() > deadline) {
       message = "The copilot ran out of time before proposing a change.";
       break;
     }
-    response = await callWithRetry();
   }
 
   const final = proposal as AgentProposal | null;
   return {
-    model,
+    model: modelLabel(model),
     steps,
     proposal: final,
     message: final ? final.reasoning : message || "The copilot stopped without proposing a change.",

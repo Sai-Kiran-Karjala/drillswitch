@@ -32,8 +32,8 @@ export default function CopilotPage() {
         <h1 className="text-3xl font-semibold tracking-tight">Let the copilot investigate. You make the call.</h1>
         <p className="text-pretty text-muted-foreground">
           Page the copilot on a drill incident. It works out who is affected, finds the smallest Flagsmith change that
-          contains it, and hands you a proposal with its blast radius. It runs on Google Gemini&apos;s free tier, and
-          every incident uses a throwaway sandbox flag.
+          contains it, and hands you a proposal with its blast radius. It runs on Google Gemini&apos;s free tier, with Groq&apos;s
+          free tier as a backup, and every incident uses a throwaway sandbox flag.
         </p>
       </div>
 

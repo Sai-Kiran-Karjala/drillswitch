@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
+import { copilotConfigured } from "@/lib/copilot/agent";
 import { demoTarget } from "@/lib/drill/flagsmith-admin";
 import { resolveScenario } from "@/lib/drill/scenario-store";
 import { createSession, toPublic } from "@/lib/drill/sessions";
 
 /** Starts a copilot drill: a sandbox incident the AI copilot investigates and a person approves. */
 export async function POST(request: Request) {
-  if (!process.env.GEMINI_API_KEY) {
+  if (!copilotConfigured()) {
     return NextResponse.json({ error: "The copilot isn't set up on this server." }, { status: 503 });
   }
   const body = (await request.json().catch(() => ({}))) as { scenario?: string };
