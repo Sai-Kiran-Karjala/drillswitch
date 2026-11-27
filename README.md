@@ -2,6 +2,8 @@
 
 **Incident drills for on-call teams, built on Flagsmith.** Something is on fire in production, and the cause is a feature flag. You have 90 seconds and one change. Turn the flag off for everyone and you cause collateral damage. Target the wrong segment and the incident stays open. Every change is written to a real Flagsmith flag, and Flagsmith's own evaluation decides whether you contained it.
 
+**Live demo: [drillswitch.vercel.app](https://drillswitch.vercel.app)**. It runs on free tiers: Vercel, Flagsmith Cloud and Neon Postgres. The repo also runs fully self-hosted with `./setup.sh`.
+
 Built by team **Shooting Stars** (Saikiran K and Deblina Datta) for the WeMakeDevs × Flagsmith **Toggle Wars** hackathon. One project, all four tracks.
 
 ```bash
@@ -84,6 +86,16 @@ web/                         Next.js 16 app (App Router, shadcn/ui)
   scripts/simulate.ts        simulated players for the experiment pipeline
 skills/put-out-the-fire/     the Agent Skill, a demo incident and its shop code
 ```
+
+## Deployment
+
+The live demo runs the same code on Vercel (app), Flagsmith Cloud (flags, segments, identities, experiments) and Neon (app database). The app adapts to either kind of Flagsmith:
+- **Versioned environments:** with v2 feature versioning (the Flagsmith Cloud default), changes are published as versions.
+- **Edge identities:** Flagsmith Cloud's identities are used for identity overrides.
+- **Grading on Cloud:** grading waits for the edge API to reflect a change before reading Flagsmith's answer.
+- **Serverless state:** drill sessions live in Postgres, so any serverless instance can serve any drill.
+
+To configure a Flagsmith Cloud project, run `FLAGSMITH_URL=https://api.flagsmith.com FLAGSMITH_API_KEY=<organisation admin key> node web/scripts/bootstrap.mjs`.
 
 ## Configuration
 
