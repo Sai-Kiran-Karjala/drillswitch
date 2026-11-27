@@ -32,7 +32,7 @@ flowchart LR
     C[AI copilot]
     W[Workspaces & plans]
   end
-  subgraph FS["Self-hosted Flagsmith"]
+  subgraph FS["Flagsmith (self-hosted or Cloud)"]
     A[Admin API]
     E[Identity evaluation]
     X[Experimentation + Postgres warehouse]
@@ -57,11 +57,25 @@ flowchart LR
 **Hypothesis:** a live blast-radius preview increases correct, first-attempt scoped rollbacks within 90 seconds.
 A/B test on the `drill_console` flag with two metrics: `scoped_recovery_verified` (higher is better) and `healthy_customers_broken` (lower is better). Real players and simulated players run in separate Flagsmith environments, so their results never mix. `/results` shows both, straight from Flagsmith. The simulator (`npm run simulate`) proves the pipeline works end to end. Its behaviour model is scripted, so it isn't evidence about people; the *Real players* tab is.
 
+Each browser is one player: an anonymous ID in a cookie keeps its version, and only its first drill counts. Replays are marked as practice and send no events, so the experiment measures first attempts, which is what the hypothesis is about.
+
+**Results** (live at [/results](https://drillswitch.vercel.app/results); snapshot of 27 Nov 2026):
+
+| | Players | Scoped fix | Healthy customers broken |
+|---|---|---|---|
+| Simulated, A: runbook only | 97 | 42.3% | 24.7% |
+| Simulated, B: plus blast-radius preview | 104 | **66.3%** (+57%, 99.6% chance to win) | **11.5%** (−53%, 100% chance to win) |
+| Real players, A | 6 | 3 of 6 | 1 of 6 |
+| Real players, B | 7 | 3 of 7 | 0 of 7 |
+
+- **Simulation: B won, and we shipped it.** Flagsmith's 95% credible interval for B's lift on scoped fixes is +14% to +100%. We ended the experiment from the API and rolled B out with the same flag, so every simulated player now gets the preview. This shows the full loop: flag, split, metric, Bayesian result, rollout.
+- **Real players: too early to call.** Flagsmith reports a win probability only once each version has 50 players and 5 events. So far, B has had no collateral damage and A has had one, while scoped fixes are level. We keep the Production experiment running and will roll out only if Flagsmith finds a winner.
+
 ### Track 2: AI Agents and Feature Flags
-`/copilot`: Gemini (free tier, via the Interactions API) gets the incident brief but isn't told who is affected. Its tools are read-only calls to Flagsmith: `get_flag_state`, `evaluate_identities` (real identity evaluation), `list_segments` and `preview_change`. It finishes with `propose_change`, which only records a proposal. **A person approves** in a confirmation dialog after seeing the predicted effect on every customer. Only then is the change written to Flagsmith and graded. In our tests it chose the right change on all five built-in incidents in 2 to 22 seconds. Copilot runs are kept out of the A/B test and team stats.
+`/copilot`: Gemini (free tier, via the Interactions API) gets the incident brief but isn't told who is affected. Its tools are read-only calls to Flagsmith: `get_flag_state`, `evaluate_identities` (real identity evaluation), `list_segments` and `preview_change`. It finishes with `propose_change`, which only records a proposal. **A person approves** in a confirmation dialog after seeing the predicted effect on every customer. Only then is the change written to Flagsmith and graded. In our tests it chose the right change on all five built-in incidents in 2 to 22 seconds. For comparison, real players with a 90-second clock landed a scoped fix on their first try 6 times out of 13. The copilot does the slow part, working out who is affected and the narrowest target, and leaves the decision to a person. Copilot runs are kept out of the A/B test and team stats.
 
 ### Track 3: Build on Open Source Flagsmith
-Everything runs on self-hosted, open-source Flagsmith: the experiment and its Postgres warehouse, the per-drill flags, identity evaluation, and plans as flags. `./setup.sh` goes from a fresh clone to a configured instance in about a minute, and it's safe to run again. Hosted workspaces get their own Production and Staging *environments*, because self-hosted Flagsmith's free licence allows one project per organisation and we work within that rather than around it.
+All of DrillSwitch runs on self-hosted, open-source Flagsmith: the experiment and its Postgres warehouse, the per-drill flags, identity evaluation, and plans as flags. (The public demo uses Flagsmith Cloud so it can run on free hosting; the same code detects which kind it is talking to.) `./setup.sh` goes from a fresh clone to a configured instance in about a minute, and it's safe to run again. Hosted workspaces get their own Production and Staging *environments*, because self-hosted Flagsmith's free licence allows one project per organisation and we work within that rather than around it.
 
 ### Track 4: Flagsmith Agent Skills
 [`skills/put-out-the-fire`](skills/put-out-the-fire/SKILL.md) works as follows:

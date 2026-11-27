@@ -23,6 +23,16 @@ const VARIANTS = [
   { key: "scope_preview", label: "B · Runbook + blast-radius preview" },
 ] as const;
 
+// Flagsmith withholds win probability until each version has this much data.
+const MIN_PLAYERS = 50;
+const MIN_EVENTS = 5;
+
+const ROLLOUT_LABEL = {
+  variant: "B · Runbook + blast-radius preview",
+  control: "A · Runbook only",
+  disable: "nothing (flag turned off)",
+} as const;
+
 const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
 const signedPct = (v: number) => `${v >= 0 ? "+" : ""}${(v * 100).toFixed(0)}%`;
 
@@ -59,6 +69,14 @@ function ExperimentPanel({ data, audience }: { data: Loaded; audience: string })
 
   return (
     <div className="flex flex-col gap-6">
+      {info.status === "completed" && (
+        <p className="rounded-lg border border-success/40 bg-success/10 p-4 text-sm">
+          <span className="font-medium">Experiment ended</span>
+          {info.ended_at ? ` on ${new Date(info.ended_at).toUTCString()}` : ""}. The winner was rolled out with the same
+          flag: everyone in this environment now gets{" "}
+          <span className="font-medium">{ROLLOUT_LABEL[info.rollout_decision ?? "control"]}</span>. These results are final.
+        </p>
+      )}
       <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-border bg-border">
         {VARIANTS.map((v) => (
           <div key={v.key} className="flex flex-col gap-1 bg-card p-4">
@@ -133,10 +151,17 @@ function ExperimentPanel({ data, audience }: { data: Loaded; audience: string })
                   </TableBody>
                 </Table>
               )}
-              {inference && (
+              {inference ? (
                 <p className="mt-3 text-xs text-muted-foreground">
                   95% credible interval for B&apos;s lift: {signedPct(inference.ci_low)} to {signedPct(inference.ci_high)}.
                 </p>
+              ) : (
+                row && (
+                  <p className="mt-3 text-xs text-muted-foreground">
+                    Collecting data. Flagsmith reports a chance to win once each version has at least {MIN_PLAYERS} players
+                    and {MIN_EVENTS} events.
+                  </p>
+                )
               )}
             </CardContent>
           </Card>
@@ -145,7 +170,7 @@ function ExperimentPanel({ data, audience }: { data: Loaded; audience: string })
 
       <p className="text-xs text-muted-foreground">
         Computed by Flagsmith&apos;s Bayesian engine{results.asOf ? ` as of ${new Date(results.asOf).toUTCString()}` : ""}.
-        Flagsmith recomputes at most once every 5 minutes. Experiment status: {info.status}.
+        {info.status === "completed" ? "" : " Flagsmith recomputes at most once every 5 minutes."}
       </p>
     </div>
   );

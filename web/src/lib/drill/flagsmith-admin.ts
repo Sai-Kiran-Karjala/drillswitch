@@ -365,6 +365,9 @@ export interface ExperimentInfo {
   hypothesis: string;
   status: string;
   started_at: string | null;
+  ended_at: string | null;
+  /** Set once the experiment is completed: what the flag serves afterwards. */
+  rollout_decision: "control" | "variant" | "disable" | null;
   metrics: { id: number; name: string; event: string; direction: string }[];
 }
 
@@ -377,6 +380,8 @@ export async function getExperiment(envKey: string, experimentId: number): Promi
     hypothesis: (exp.hypothesis as string) ?? "",
     status: exp.status as string,
     started_at: (exp.started_at as string) ?? null,
+    ended_at: (exp.ended_at as string) ?? null,
+    rollout_decision: (exp.rollout_decision as ExperimentInfo["rollout_decision"]) ?? null,
     metrics: metrics.map((m) => ({
       id: m.id as number,
       name: m.name as string,
