@@ -155,7 +155,7 @@ export default function Home() {
             <Link href="/results" className="underline underline-offset-4 hover:text-foreground">
               See live results
             </Link>
-            . Demo drills use a random ID per drill; team drills use your account ID. Nothing else is sent to Flagsmith.
+            . Demo drills use a random ID kept in a cookie on this browser, so only your first drill counts; team drills use your account ID. Nothing else is sent to Flagsmith.
           </p>
         </div>
       </section>

@@ -1,6 +1,8 @@
+import { Suspense } from "react";
 import Link from "next/link";
 import { Siren } from "lucide-react";
 import { AccountNav } from "@/components/account-nav";
+import { MobileNav } from "@/components/mobile-nav";
 import { clerkEnabled } from "@/lib/saas/clerk-enabled";
 
 const NAV = [
@@ -12,7 +14,7 @@ const NAV = [
 
 export function SiteHeader() {
   return (
-    <header className="border-b border-border/60 bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+    <header className="relative border-b border-border/60 bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60">
       <div className="mx-auto flex h-14 w-full max-w-6xl items-center justify-between px-4 sm:px-6">
         <Link
           href="/"
@@ -23,7 +25,7 @@ export function SiteHeader() {
           </span>
           DrillSwitch
         </Link>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1 sm:gap-2">
           <nav
             aria-label="Main"
             className="hidden items-center gap-1 text-sm sm:flex"
@@ -39,6 +41,10 @@ export function SiteHeader() {
             ))}
           </nav>
           {clerkEnabled && <AccountNav />}
+          {/* MobileNav reads the URL, which is dynamic on routes like /drill/[id]. */}
+          <Suspense fallback={<div className="size-9 sm:hidden" />}>
+            <MobileNav items={NAV} showAccount={clerkEnabled} />
+          </Suspense>
         </div>
       </div>
     </header>

@@ -11,7 +11,7 @@ export function AccountNav() {
         when="signed-in"
         fallback={
           <>
-            <Button asChild variant="ghost" size="sm">
+            <Button asChild variant="ghost" size="sm" className="hidden sm:inline-flex">
               <Link href="/sign-in">Sign in</Link>
             </Button>
             <Button asChild size="sm">
