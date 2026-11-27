@@ -261,7 +261,7 @@ for (const name of EXPERIMENT_ENVS) {
   experiments[name] = await ensureExperiment(key, featureId, optionId, await ensureMetrics(key));
 }
 
-const envFile = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '.env.local');
+const envFile = process.env.BOOTSTRAP_ENV_FILE ?? path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '.env.local');
 // Keep keys this script does not own (Clerk keys, anything added by hand).
 const current = existsSync(envFile)
   ? Object.fromEntries(
@@ -285,7 +285,7 @@ const owned = {
   FLAGSMITH_EXPERIMENT_PRODUCTION: experiments.Production,
   FLAGSMITH_EXPERIMENT_SIMULATION: experiments.Simulation,
   DRILL_SIM_SECRET: process.env.DRILL_SIM_SECRET ?? current.DRILL_SIM_SECRET ?? randomBytes(16).toString('hex'),
-  DATABASE_URL: current.DATABASE_URL ?? 'postgres://drillswitch:drillswitch@127.0.0.1:5433/drillswitch',
+  DATABASE_URL: current.DATABASE_URL ?? process.env.DATABASE_URL ?? 'postgres://drillswitch:drillswitch@127.0.0.1:5433/drillswitch',
   DRILLSWITCH_ENCRYPTION_KEY: current.DRILLSWITCH_ENCRYPTION_KEY ?? randomBytes(32).toString('base64'),
 };
 const merged = { ...current, ...owned };

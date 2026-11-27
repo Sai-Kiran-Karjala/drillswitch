@@ -1,3 +1,5 @@
+# Self-hosted Flagsmith for DrillSwitch, based on Flagsmith's own docker-compose.yml.
+# Ports can be moved with FLAGSMITH_PORT / FLAGSMITH_PROCESSOR_PORT (see ../setup.sh).
 # See https://docs.flagsmith.com/deployment/docker for more information on running Flagsmith in Docker
 # This Docker Compose file will run the entire Flagsmith Platform
 
@@ -10,7 +12,7 @@ x-flagsmith-env: &flagsmith-env
   USE_POSTGRES_FOR_ANALYTICS: 'true' # Store API and Flag Analytics data in Postgres
   ENVIRONMENT: production # set to 'production' in production.
   DJANGO_ALLOWED_HOSTS: '*' # Change this in production
-  FLAGSMITH_DOMAIN: localhost:8000 # Change this in production
+  FLAGSMITH_DOMAIN: localhost:${FLAGSMITH_PORT:-8000} # Change this in production
   DJANGO_SECRET_KEY: secret # Change this in production
   WAREHOUSE_CREDENTIALS_SECRET: secret # Change this in production
   # PREVENT_SIGNUP: 'true' # Uncomment to prevent any additional signups
@@ -48,7 +50,6 @@ services:
     environment:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: flagsmith
-    container_name: flagsmith_postgres
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -78,7 +79,7 @@ services:
     environment:
       <<: *flagsmith-env
     ports:
-      - 8000:8000
+      - ${FLAGSMITH_PORT:-8000}:8000 # API, SDK endpoints and the Flagsmith dashboard
     depends_on:
       migrate-db:
         condition: service_completed_successfully
@@ -91,7 +92,7 @@ services:
     environment:
       <<: *flagsmith-env
     ports:
-      - 8001:8000
+      - ${FLAGSMITH_PROCESSOR_PORT:-8001}:8000
     depends_on:
       migrate-db:
         condition: service_completed_successfully

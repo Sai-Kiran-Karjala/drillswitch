@@ -10,7 +10,7 @@ services:
       POSTGRES_USER: drillswitch
       POSTGRES_PASSWORD: ${APPDB_PASSWORD:-drillswitch}
     ports:
-      - '127.0.0.1:5433:5432' # localhost only
+      - '127.0.0.1:${APPDB_PORT:-5433}:5432' # localhost only
     volumes:
       - appdata:/var/lib/postgresql/data
     healthcheck:
