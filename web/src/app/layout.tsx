@@ -7,6 +7,10 @@ import { SiteHeader } from "@/components/site-header";
 import { Toaster } from "@/components/ui/sonner";
 import "./globals.css";
 
+// Runs before first paint. Clerk's __client_uat cookie is 0 when signed out and a timestamp
+// when signed in, so the header can hide its signed-out buttons until the server's answer streams in.
+const SIGNED_IN_HINT = `if(/(?:^|; )__client_uat(?:_[^=]*)?=[1-9]/.test(document.cookie))document.documentElement.dataset.signedIn=""`;
+
 const geistSans = Geist({ variable: "--font-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
 
@@ -25,7 +29,16 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     </>
   );
   return (
-    <html lang="en" className={`${geistSans.variable} ${geistMono.variable} dark h-full antialiased`}>
+    <html
+      lang="en"
+      className={`${geistSans.variable} ${geistMono.variable} dark h-full antialiased`}
+      suppressHydrationWarning
+    >
+      {clerkEnabled && (
+        <head>
+          <script dangerouslySetInnerHTML={{ __html: SIGNED_IN_HINT }} />
+        </head>
+      )}
       <body className="flex min-h-full flex-col">
         {clerkEnabled ? <ClerkProvider appearance={{ theme: shadcn }}>{app}</ClerkProvider> : app}
       </body>

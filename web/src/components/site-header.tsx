@@ -41,14 +41,28 @@ export function SiteHeader() {
               </Link>
             ))}
           </nav>
-          {/* Reads the session on the server, so the buttons arrive with the page
-              instead of waiting for Clerk's browser script. */}
-          <Suspense fallback={<div className="size-9 sm:hidden" />}>
+          {/* The session is read on the server and streamed in. Until then, show the
+              signed-out buttons, which is what most visitors need; the layout's cookie
+              hint hides them for signed-in users so they never flash "Sign in". */}
+          <Suspense fallback={<SignedOutActions />}>
             <HeaderActions />
           </Suspense>
         </div>
       </div>
     </header>
+  );
+}
+
+function SignedOutActions() {
+  return (
+    <>
+      {clerkEnabled && (
+        <div className="contents [html[data-signed-in]_&]:invisible">
+          <AccountNav signedIn={false} />
+        </div>
+      )}
+      <MobileNav items={NAV} showAccount={clerkEnabled} signedIn={false} />
+    </>
   );
 }
 
