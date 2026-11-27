@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Show } from "@clerk/nextjs";
 import { Menu, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -11,7 +10,15 @@ import { cn } from "@/lib/utils";
 type NavItem = { href: string; label: string };
 
 /** The header's links on small screens, where the inline nav is hidden. */
-export function MobileNav({ items, showAccount }: { items: NavItem[]; showAccount: boolean }) {
+export function MobileNav({
+  items,
+  showAccount,
+  signedIn,
+}: {
+  items: NavItem[];
+  showAccount: boolean;
+  signedIn: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const pathname = usePathname();
 
@@ -55,14 +62,12 @@ export function MobileNav({ items, showAccount }: { items: NavItem[]; showAccoun
           className="absolute inset-x-0 top-14 z-50 border-b border-border/60 bg-background px-4 pb-4 pt-2 shadow-sm"
         >
           <ul className="space-y-1">
-            {showAccount && (
-              <Show when="signed-in">
-                <li>
-                  <Link href="/dashboard" className={linkClass("/dashboard")}>
-                    Dashboard
-                  </Link>
-                </li>
-              </Show>
+            {showAccount && signedIn && (
+              <li>
+                <Link href="/dashboard" className={linkClass("/dashboard")}>
+                  Dashboard
+                </Link>
+              </li>
             )}
             {items.map((item) => (
               <li key={item.href}>
@@ -71,14 +76,12 @@ export function MobileNav({ items, showAccount }: { items: NavItem[]; showAccoun
                 </Link>
               </li>
             ))}
-            {showAccount && (
-              <Show when="signed-out">
-                <li className="border-t border-border/60 pt-1">
-                  <Link href="/sign-in" className={linkClass("/sign-in")}>
-                    Sign in
-                  </Link>
-                </li>
-              </Show>
+            {showAccount && !signedIn && (
+              <li className="border-t border-border/60 pt-1">
+                <Link href="/sign-in" className={linkClass("/sign-in")}>
+                  Sign in
+                </Link>
+              </li>
             )}
           </ul>
         </nav>

@@ -1,6 +1,7 @@
 import { Suspense } from "react";
 import Link from "next/link";
 import { Siren } from "lucide-react";
+import { auth } from "@clerk/nextjs/server";
 import { AccountNav } from "@/components/account-nav";
 import { MobileNav } from "@/components/mobile-nav";
 import { clerkEnabled } from "@/lib/saas/clerk-enabled";
@@ -40,13 +41,23 @@ export function SiteHeader() {
               </Link>
             ))}
           </nav>
-          {clerkEnabled && <AccountNav />}
-          {/* MobileNav reads the URL, which is dynamic on routes like /drill/[id]. */}
+          {/* Reads the session on the server, so the buttons arrive with the page
+              instead of waiting for Clerk's browser script. */}
           <Suspense fallback={<div className="size-9 sm:hidden" />}>
-            <MobileNav items={NAV} showAccount={clerkEnabled} />
+            <HeaderActions />
           </Suspense>
         </div>
       </div>
     </header>
+  );
+}
+
+async function HeaderActions() {
+  const signedIn = clerkEnabled ? Boolean((await auth()).userId) : false;
+  return (
+    <>
+      {clerkEnabled && <AccountNav signedIn={signedIn} />}
+      <MobileNav items={NAV} showAccount={clerkEnabled} signedIn={signedIn} />
+    </>
   );
 }
