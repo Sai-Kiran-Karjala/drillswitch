@@ -207,7 +207,13 @@ export async function updateSegmentOverride(
     });
     return;
   }
-  await adminRequest(t, "PATCH", `environments/${envKey}/featurestates/${featureStateId}/`, { enabled });
+  // Segment overrides are edited through the general feature-states endpoint; the environment one
+  // only covers defaults. It needs the environment and feature even for a partial update.
+  await adminRequest(t, "PATCH", `features/featurestates/${featureStateId}/`, {
+    enabled,
+    environment: env.id,
+    feature: featureId,
+  });
 }
 
 /** Adds an identity override, creating the identity first if this environment hasn't seen it. */
