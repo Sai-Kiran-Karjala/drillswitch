@@ -16,8 +16,9 @@ import { flagsmithIdentity, type DrillSession } from "@/lib/drill/sessions";
 // The incident copilot: Gemini with read-only Flagsmith tools plus propose_change, which only
 // records a proposal. A person approves it in the UI; only then is anything written to Flagsmith.
 
-// Free-tier models, fastest first. Override with GEMINI_MODELS=a,b,c in .env.local.
-const DEFAULT_MODELS = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.6-flash"];
+// Free-tier models, fastest first. Each has its own free daily quota (about 20 requests), so
+// more models means more copilot runs per day. Override with GEMINI_MODELS=a,b,c in .env.local.
+const DEFAULT_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.6-flash"];
 const MAX_TURNS = 8;
 const CALL_TIMEOUT_MS = 30_000;
 /** An on-call copilot that takes longer than the drill itself isn't helping. */
@@ -223,35 +224,64 @@ type Steps = Awaited<ReturnType<GoogleGenAI["interactions"]["create"]>> extends 
   ? R extends { steps: infer S } ? S : never
   : never;
 
+// Models that answered 429 (usually the free tier's daily quota) are skipped until Google says
+// to retry. Kept per server instance; one failed call is enough for an instance to learn it.
+const cooldownUntil = ((globalThis as { __geminiCooldown?: Map<string, number> }).__geminiCooldown ??= new Map());
+
+/** Reads "Please retry in 18h19m50s" from a 429, falling back to an hour for daily limits. */
+function retryAfterMs(error: unknown): number {
+  const message = String((error as { message?: string }).message ?? "");
+  const m = message.match(/retry in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?/i);
+  if (m && (m[1] || m[2] || m[3])) return ((Number(m[1]) || 0) * 3600 + (Number(m[2]) || 0) * 60 + (Number(m[3]) || 0)) * 1000;
+  return /per day/i.test(message) ? 60 * 60 * 1000 : 60 * 1000;
+}
+
+const status = (error: unknown) => (error as { status?: number }).status ?? 0;
+
 export async function runCopilot(session: DrillSession): Promise<AgentRun> {
   const ai = gemini();
   const started = Date.now();
+  const ready = models().filter((m) => (cooldownUntil.get(m) ?? 0) <= Date.now());
+  // Every model cooling down: try them all anyway, in case a quota reset early.
+  for (const model of ready.length ? ready : models()) {
+    if (Date.now() - started > RUN_BUDGET_MS) break;
+    try {
+      return await investigate(ai, session, model, started);
+    } catch (error) {
+      if (!isOverloaded(error)) throw error;
+      if (status(error) === 429) cooldownUntil.set(model, Date.now() + retryAfterMs(error));
+      // The tools only read, so starting over on the next model is safe.
+      console.warn(`copilot: ${model} unavailable (${status(error)}), trying the next model`);
+    }
+  }
+  throw new CopilotUnavailable("The copilot's free AI quota is used up for now. Try again later, or run the drill yourself.");
+}
+
+/** One full investigation on one model. Thought steps tie a conversation to the model that started it. */
+async function investigate(ai: GoogleGenAI, session: DrillSession, model: string, started: number): Promise<AgentRun> {
   const steps: AgentStep[] = [];
   let proposal: AgentProposal | null = null;
   const history: unknown[] = [{ type: "user_input", content: [{ type: "text", text: brief(session) }] }];
 
-  const call = (model: string) =>
+  const call = () =>
     ai.interactions.create(
       // Stateless: the conversation stays on this server (store: false) and is resent each turn.
       { model, input: history as never, tools: TOOLS, store: false, system_instruction: SYSTEM },
       { timeout_ms: CALL_TIMEOUT_MS },
     ) as Promise<{ steps: Steps; output_text?: string }>;
 
-  // Pick the first model that answers; thought steps tie the rest of the conversation to it.
-  let model = "";
-  let response: { steps: Steps; output_text?: string } | undefined;
-  for (const candidate of models()) {
+  const callWithRetry = async () => {
     try {
-      response = await call(candidate);
-      model = candidate;
-      break;
+      return await call();
     } catch (error) {
-      if (!isOverloaded(error)) throw error;
-      console.warn(`copilot: ${candidate} unavailable (${(error as { status?: number }).status}), trying the next model`);
+      // A quota error won't clear in two seconds; let runCopilot move to the next model.
+      if (!isOverloaded(error) || status(error) === 429) throw error;
+      await new Promise((r) => setTimeout(r, 2000));
+      return call();
     }
-  }
-  if (!response) throw new CopilotUnavailable("Every Gemini model is busy right now. Try again in a minute.");
+  };
 
+  let response = await call();
   let message = "";
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     history.push(...response.steps);
@@ -283,13 +313,7 @@ export async function runCopilot(session: DrillSession): Promise<AgentRun> {
       message = "The copilot ran out of time before proposing a change.";
       break;
     }
-    try {
-      response = await call(model);
-    } catch (error) {
-      if (!isOverloaded(error)) throw error;
-      await new Promise((r) => setTimeout(r, 2000));
-      response = await call(model);
-    }
+    response = await callWithRetry();
   }
 
   const final = proposal as AgentProposal | null;
